@@ -35,6 +35,10 @@ on:
         description: 'Branch where the failure occurred'
         required: false
         default: 'main'
+      trigger_source:
+        description: 'Source that triggered the analyzer, e.g. workflow_run, workflow_dispatch, repository_dispatch'
+        required: false
+        default: 'workflow_dispatch'
 
 # Read-only by default. Only the safe-output below can write to GitHub.
 permissions:
@@ -65,6 +69,7 @@ You are a senior SRE and code reviewer analyzing a GitHub Actions CI failure.
 - Branch: `${{ inputs.branch }}`
 - Run URL: `${{ inputs.run_url }}`
 - PR number (may be empty): `${{ inputs.pr_number }}`
+- Trigger source: `${{ inputs.trigger_source }}`
 
 ---
 
@@ -106,11 +111,9 @@ If this failure is linked to a PR:
    Focus on: what files were changed, what was added or removed.
 
 2. Read the existing pull request review comments and issue comments on PR #`${{ inputs.pr_number }}`.
-   Look for comments from automated reviewers, especially:
-   - `github-cr-agent`
-   - `promoagent-cr`
-   - `github-actions`
-   - any bot comments that include `CR Agent`, `Code Review`, or `review finding`
+   Look for comments from automated reviewers. Common signals include bot users, GitHub Actions
+   comments, review summaries, or comments that include terms such as `CR Agent`, `Code Review`,
+   `review finding`, `automated review`, or repository-specific review-agent names.
 
    These represent prior code review of the same changes. Use their findings as additional signal,
    but do not blindly trust them over the CI logs.
@@ -168,6 +171,7 @@ Severity must always appear in the title and body.
 **Commit:** `${{ inputs.sha }}`
 **Branch:** `${{ inputs.branch }}`
 **PR:** #${{ inputs.pr_number }} (אם רלוונטי)
+**Trigger source:** `${{ inputs.trigger_source }}`
 **ריצה:** ${{ inputs.run_url }}
 
 ---
