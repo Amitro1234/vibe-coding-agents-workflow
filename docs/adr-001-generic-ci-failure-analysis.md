@@ -39,7 +39,13 @@ Use a four-role architecture:
    - Detects whether the failure is linked to a PR.
    - If PR-linked, fetches PR diff and existing review-agent comments.
    - Continues with logs-only analysis when there is no PR or no review output.
+   - Correlates logs, artifacts, failed steps, changed files, and review comments.
+   - Decides severity and confidence.
+   - Decides whether to open an issue, produce only a lower-impact report/comment, or no-op.
    - Creates an issue/report even when labels are missing.
+
+No additional per-run orchestration agent should be added. If another agent is needed later, it
+should analyze recurring failures or fleet health across many runs/repositories.
 
 ## Runtime Flows
 
@@ -48,8 +54,9 @@ Use a four-role architecture:
 ```mermaid
 flowchart TD
     A[PR opened or updated] --> B[Optional Review Agent]
-    B --> C[PR review comments or review summary]
     A --> D[CI workflows run]
+    B --> C[PR review comments or review summary]
+    C -. stored on PR; does not trigger analysis .-> R[PR review evidence]
     D --> E{CI workflow failed?}
     E -- no --> F[Stop]
     E -- yes --> G[Failure Router via workflow_run]
@@ -57,12 +64,16 @@ flowchart TD
     H --> I[workflow_dispatch Failure Analyzer]
     I --> J[Fetch failed jobs, logs, artifacts]
     I --> K[Fetch PR diff]
-    I --> L[Fetch existing review comments if available]
-    J --> M[Correlate logs, steps, files, review signals]
+    I -. later reads PR review evidence .-> L[Fetch existing review comments if available]
+    R -. evidence source .-> L
+    J --> M[Analyzer correlates logs, failed steps, changed files, review comments]
     K --> M
     L --> M
-    M --> N[Classify blocker, minor, or infra]
-    N --> O[Create issue or report with severity in title and body]
+    M --> N[Classify severity and confidence]
+    N --> O{Output policy}
+    O -- confirmed or recurring --> P[Create GitHub issue]
+    O -- minor or low confidence --> Q[PR/report comment or workflow summary]
+    O -- inconclusive --> R[Visible no-op or human follow-up needed]
 ```
 
 ### Post-Merge / Main Failure Flow
@@ -82,8 +93,11 @@ flowchart TD
     J --> L[Fetch failed jobs, logs, artifacts, commit metadata]
     K --> M[Correlate available evidence]
     L --> M
-    M --> N[Classify blocker, minor, or infra]
-    N --> O[Create issue or report with severity in title and body]
+    M --> N[Classify severity and confidence]
+    N --> O{Output policy}
+    O -- confirmed or recurring --> P[Create GitHub issue]
+    O -- minor or low confidence --> Q[Workflow summary or report only]
+    O -- inconclusive --> R[Visible no-op or human follow-up needed]
 ```
 
 ## Stable Analyzer Contract
@@ -155,6 +169,20 @@ Labels are optional. Recommended labels are:
 
 Missing labels must not block issue/report creation. Severity must always be present in the
 issue/report title and body.
+
+## Output Policy
+
+The Failure Analyzer is the single per-run decision-maker.
+
+Open a GitHub issue when the failure is a blocker with high/medium confidence, a confirmed code
+bug, a recurring failure pattern, or likely requires tracked human work beyond the current PR.
+
+Use a PR comment, workflow summary, or report-only output for minor or low-confidence findings.
+If PR comment safe outputs are not available in the target repository, prefer a visible workflow
+summary/report over creating an issue.
+
+Use explicit no-op or human-follow-up-needed output when logs, artifacts, PR context, or failed job
+details are insufficient to make a safe severity decision.
 
 ## Extension Guidance
 

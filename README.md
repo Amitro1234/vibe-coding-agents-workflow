@@ -15,9 +15,10 @@ The template keeps four roles separate:
 - **Review Agent**: optional PR review agent. It reviews code only and never orchestrates CI failure handling.
 - **CI Workflows**: existing build, test, lint, deploy, or release workflows. They stay deterministic and independent.
 - **Failure Router**: small non-agentic workflow. It detects failed watched workflows, normalizes context, and dispatches the analyzer.
-- **Failure Analyzer**: separate agentic workflow. It reads logs, artifacts, PR context, and optional review output, then creates a severity report.
+- **Failure Analyzer**: separate agentic workflow. It reads logs, artifacts, PR context, and optional review output, then decides whether to open an issue, write a lower-impact report/comment, or no-op.
 
 The analyzer classifies failures as `blocker`, `minor`, or `infra`.
+It is the single per-run decision-maker. Do not add another per-run orchestration agent on top of it.
 
 ## Runtime Flows
 
@@ -26,8 +27,9 @@ The analyzer classifies failures as `blocker`, `minor`, or `infra`.
 ```mermaid
 flowchart TD
     A[PR opened or updated] --> B[Optional Review Agent]
-    B --> C[PR review comments or review summary]
     A --> D[CI workflows run]
+    B --> C[PR review comments or review summary]
+    C -. stored on PR; does not trigger analysis .-> R[PR review evidence]
     D --> E{CI workflow failed?}
     E -- no --> F[Stop]
     E -- yes --> G[Failure Router via workflow_run]
@@ -35,12 +37,16 @@ flowchart TD
     H --> I[workflow_dispatch Failure Analyzer]
     I --> J[Fetch failed jobs, logs, artifacts]
     I --> K[Fetch PR diff]
-    I --> L[Fetch existing review comments if available]
-    J --> M[Correlate logs, steps, files, review signals]
+    I -. later reads PR review evidence .-> L[Fetch existing review comments if available]
+    R -. evidence source .-> L
+    J --> M[Analyzer correlates logs, failed steps, changed files, review comments]
     K --> M
     L --> M
-    M --> N[Classify blocker, minor, or infra]
-    N --> O[Create issue or report with severity in title and body]
+    M --> N[Classify severity and confidence]
+    N --> O{Output policy}
+    O -- confirmed or recurring --> P[Create GitHub issue]
+    O -- minor or low confidence --> Q[PR/report comment or workflow summary]
+    O -- inconclusive --> R[Visible no-op or human follow-up needed]
 ```
 
 ### Post-Merge / Main Failure Flow
@@ -60,8 +66,11 @@ flowchart TD
     J --> L[Fetch failed jobs, logs, artifacts, commit metadata]
     K --> M[Correlate available evidence]
     L --> M
-    M --> N[Classify blocker, minor, or infra]
-    N --> O[Create issue or report with severity in title and body]
+    M --> N[Classify severity and confidence]
+    N --> O{Output policy}
+    O -- confirmed or recurring --> P[Create GitHub issue]
+    O -- minor or low confidence --> Q[Workflow summary or report only]
+    O -- inconclusive --> R[Visible no-op or human follow-up needed]
 ```
 
 ## Generic Template Structure
@@ -167,6 +176,47 @@ Recommended labels:
 If labels are missing, the analyzer must still create the issue/report and include severity in
 the title/body, for example `[CI-ANALYSIS][blocker] Build`.
 
+## Analyzer Output Policy
+
+The Failure Analyzer owns the per-run decision. It decides severity, confidence, correlation, and
+the output type. The router only dispatches; the review agent only reviews code.
+
+### Open A GitHub Issue
+
+Use the `create-issue` safe output when one of these is true:
+
+- `blocker` with high or medium confidence.
+- Confirmed code bug.
+- Recurring failure pattern.
+- Failure likely needs tracked human work outside the current PR.
+
+Issue reports must include workflow name, run URL, status/conclusion, severity, confidence, key
+evidence, correlation notes, and recommended next step.
+
+### PR Comment / Report Only
+
+Do not open an issue when one of these is true:
+
+- `minor` finding.
+- Low-confidence finding.
+- Useful context but not enough evidence for tracked work.
+- Transient or PR-local failure.
+
+If PR comment safe outputs are available in a target repository, the analyzer may post a concise
+PR report. Otherwise it should write a visible workflow summary/report and avoid issue creation.
+
+### Inconclusive / No-Op
+
+Do not open an issue when evidence is insufficient:
+
+- Logs are unavailable or not diagnostic.
+- Failed job details cannot be read.
+- No PR is discoverable and logs do not identify a clear owner/root cause.
+- Severity cannot be decided safely.
+
+The result must be visible and explicit: `NO-OP: inconclusive` or `HUMAN FOLLOW-UP NEEDED`, with
+what was checked and what evidence was missing.
+
 ## Bootstrap Install Steps
 
 Bootstrap is one-time per repository:
@@ -226,6 +276,9 @@ run metadata.
 To support external systems or cross-repository routing later, add a small adapter that uses
 `repository_dispatch` or another trigger, then maps its payload into the same stable analyzer
 contract. Do not make the analyzer parse multiple raw event shapes.
+
+Do not add another per-run orchestration agent. If another agent is needed later, it should analyze
+recurring failures or fleet health across many runs/repositories, not orchestrate a single failure.
 
 ## Relationship To GithubHelper
 
