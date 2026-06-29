@@ -88,7 +88,11 @@ gh aw compile
 
 4. Commit the Markdown specs, generated lock files, and trigger workflow.
 
-5. Create labels in the target repo:
+5. Edit `.github/workflows/trigger-ci-failure-analysis.yml` and set `on.workflow_run.workflows`
+   to the names of the CI workflows that should trigger analysis in that repository.
+   GitHub requires `workflow_run` triggers to name the workflows they watch.
+
+6. Create labels in the target repo:
 
 | Label | Description |
 |---|---|

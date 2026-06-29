@@ -2,6 +2,12 @@ name: Trigger CI Failure Analysis
 
 on:
   workflow_run:
+    # Customize this list in each target repository.
+    # GitHub requires workflow_run triggers to name the workflows they watch.
+    workflows:
+      - CI
+      - Build
+      - Test
     types: [completed]
 
 permissions:
