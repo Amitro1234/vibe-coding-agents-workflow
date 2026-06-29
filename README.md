@@ -1,79 +1,88 @@
-# Generic GitHub Agentic Workflows
+# Generic CI Failure Analysis Workflows
 
-Reusable, repository-local automation for code review and CI failure analysis.
+Reusable, repository-local automation for CI failure analysis.
 
-This package is designed to be copied into **any GitHub repository in any organization**.
-It does not depend on a central runtime repo, Power Platform, or `Amitro1234/vibe-coding-agents-workflow`.
-That repo can host the source template, but each organization runs the workflows locally.
+This template can be installed in any GitHub repository in any organization. It does not require a
+central runtime repository, Power Platform, or any PromoAgent-specific workflow. The repository that
+uses the template owns its triggers, permissions, reports, billing, and audit trail.
 
-It uses [GitHub Agentic Workflows](https://github.blog/ai-and-ml/automate-repository-tasks-with-github-agentic-workflows/):
-Markdown workflow specs are compiled into GitHub Actions lock files with `gh aw compile`.
+Design rationale: [`docs/adr-001-generic-ci-failure-analysis.md`](docs/adr-001-generic-ci-failure-analysis.md).
 
 ## What It Does
 
-- **Review Agent**: `github-cr-agent.md` reviews PR changes only. If a repository already has
-  a review agent, keep it and do not install a second one.
-- **CI Workflows**: existing build/test/deploy workflows remain deterministic and independent.
-- **Failure Router**: `trigger-ci-failure-analysis.yml` listens for failed workflow runs using
-  native `workflow_run`, normalizes context, and dispatches the analyzer.
-- **Failure Analyzer**: `ci-failure-analysis.md` reads failed job logs, artifacts, PR diff, and
-  optional CR-agent/review-bot comments, then classifies severity:
-  `blocker`, `minor`, or `infra`.
-- CI analysis results are written as GitHub issues in the same repository.
+The template keeps four roles separate:
 
-## Flow
+- **Review Agent**: optional PR review agent. It reviews code only and never orchestrates CI failure handling.
+- **CI Workflows**: existing build, test, lint, deploy, or release workflows. They stay deterministic and independent.
+- **Failure Router**: small non-agentic workflow. It detects failed watched workflows, normalizes context, and dispatches the analyzer.
+- **Failure Analyzer**: separate agentic workflow. It reads logs, artifacts, PR context, and optional review output, then creates a severity report.
+
+The analyzer classifies failures as `blocker`, `minor`, or `infra`.
+
+## Runtime Flows
+
+### Normal PR Failure Flow
 
 ```mermaid
 flowchart TD
-    A[Developer opens or updates PR] --> B[github-cr-agent.md reviews diff]
-    B --> C{CR agent found issue?}
-    C -- yes --> D[Create CR tracking issue]
-    C -- no --> E[No output]
-
-    A --> F[Normal CI workflows run]
-    F --> G{CI failed?}
-    G -- no --> H[No analysis]
-    G -- yes --> I[trigger-ci-failure-analysis.yml]
-
-    I --> J[Dispatch local ci-failure-analysis.md]
-    J --> K[Read failed job logs]
-    K --> L[Read PR diff]
-    L --> M[Read CR/review-bot findings]
-    M --> N{Severity}
-
-    N -- blocker --> O[Issue: severity:blocker]
-    N -- minor --> P[Issue: severity:minor]
-    N -- infra --> Q[Issue: severity:infra]
+    A[PR opened or updated] --> B[Optional Review Agent]
+    B --> C[PR review comments or review summary]
+    A --> D[CI workflows run]
+    D --> E{CI workflow failed?}
+    E -- no --> F[Stop]
+    E -- yes --> G[Failure Router via workflow_run]
+    G --> H[Normalize payload]
+    H --> I[workflow_dispatch Failure Analyzer]
+    I --> J[Fetch failed jobs, logs, artifacts]
+    I --> K[Fetch PR diff]
+    I --> L[Fetch existing review comments if available]
+    J --> M[Correlate logs, steps, files, review signals]
+    K --> M
+    L --> M
+    M --> N[Classify blocker, minor, or infra]
+    N --> O[Create issue or report with severity in title and body]
 ```
 
-## Installed Files
+### Post-Merge / Main Failure Flow
 
-Copy these files into each target repository:
+```mermaid
+flowchart TD
+    A[Push or merge to default branch] --> B[CI or deploy workflow runs]
+    B --> C{Workflow failed?}
+    C -- no --> D[Stop]
+    C -- yes --> E[Failure Router via workflow_run]
+    E --> F[Normalize payload with run_id, sha, branch, workflow_name]
+    F --> G[Try commit-to-PR lookup]
+    G --> H{Associated PR found?}
+    H -- yes --> I[workflow_dispatch Failure Analyzer with pr_number]
+    H -- no --> J[workflow_dispatch Failure Analyzer without pr_number]
+    I --> K[Fetch failed jobs, logs, artifacts, PR diff, review comments if available]
+    J --> L[Fetch failed jobs, logs, artifacts, commit metadata]
+    K --> M[Correlate available evidence]
+    L --> M
+    M --> N[Classify blocker, minor, or infra]
+    N --> O[Create issue or report with severity in title and body]
+```
+
+## Generic Template Structure
+
+Install these files into each target repository:
 
 ```text
 .github/
   workflows/
-    github-cr-agent.md
-    ci-failure-analysis.md
-    trigger-ci-failure-analysis.yml
+    github-cr-agent.md                 # optional Review Agent
+    <existing CI workflows>.yml         # CI Workflows, unchanged
+    trigger-ci-failure-analysis.yml     # Failure Router
+    ci-failure-analysis.md              # Failure Analyzer
 ```
 
 If the target repository already has a review agent, do not copy `github-cr-agent.md`.
 The analyzer treats review output as an optional input signal, not as an orchestrator.
 
-## Generic Template Structure
-
-```text
-.github/workflows/
-  github-cr-agent.md                 # optional Review Agent
-  <your existing CI workflows>.yml    # CI Workflows, unchanged
-  trigger-ci-failure-analysis.yml     # Failure Router
-  ci-failure-analysis.md              # Failure Analyzer
-```
-
 ## Repository-Specific Configuration Points
 
-### Watched Workflow Names
+### Watched Workflows
 
 Edit only the isolated configuration block in `trigger-ci-failure-analysis.yml`:
 
@@ -88,15 +97,21 @@ on:
     types: [completed]
 ```
 
-Use CI/test/build/deploy workflow names. Do not include the review-agent workflow unless
-you explicitly want to analyze review-agent failures.
+Use CI/test/build/deploy workflow names. Do not include the review-agent workflow unless you
+explicitly want analyzer reports for review-agent failures.
 
-GitHub requires `workflow_run.workflows` to be a static list in the workflow file, so this
-cannot be loaded dynamically from a runtime config file.
+GitHub requires `workflow_run.workflows` to be a static list in the workflow file, so this cannot
+be loaded dynamically from a runtime config file. Keep repository-specific names in this block only.
 
-### Stable Analyzer Contract
+### Review Agent Signals
 
-The router dispatches the analyzer with this stable `workflow_dispatch` input contract:
+If your repository uses a review agent, the analyzer can read its PR comments/reviews as evidence.
+Repository-specific review bot names can be mentioned in the analyzer prompt in the target repo.
+They should not be embedded in router logic.
+
+## Stable Analyzer Contract
+
+The Failure Router dispatches the Failure Analyzer with this stable `workflow_dispatch` input contract:
 
 | Input | Required | Meaning |
 |---|---:|---|
@@ -111,10 +126,14 @@ The router dispatches the analyzer with this stable `workflow_dispatch` input co
 | `repo` | Yes | Repository name |
 | `trigger_source` | No | Usually `workflow_run`; future values may include `repository_dispatch` |
 
-`workflow_dispatch` is the default same-repo handoff mechanism. Use `repository_dispatch`
-only as a future extension for cross-repo or external triggers.
+`workflow_dispatch` is the default same-repository handoff mechanism. It gives typed inputs, a clear
+manual re-run path, branch selection, and a simple audit trail. The analyzer must exist on the
+default branch before it can be manually triggered from the GitHub Actions UI.
 
-### Permissions
+`repository_dispatch` is documented as a future extension for cross-repository or external triggers.
+If added, it should map `client_payload` into the same analyzer contract before analysis starts.
+
+## Permissions
 
 Router:
 
@@ -136,9 +155,9 @@ permissions:
 
 The analyzer writes only through its agentic workflow `safe-outputs`.
 
-### Optional Labels
+## Labels Are Optional
 
-Labels are optional. Recommended labels:
+Recommended labels:
 
 - `ci-analysis`
 - `severity:blocker`
@@ -148,7 +167,20 @@ Labels are optional. Recommended labels:
 If labels are missing, the analyzer must still create the issue/report and include severity in
 the title/body, for example `[CI-ANALYSIS][blocker] Build`.
 
-After compilation, commit the generated lock files too:
+## Bootstrap Install Steps
+
+Bootstrap is one-time per repository:
+
+1. Copy the router and analyzer into the target repository.
+2. If the repository does not already have a review agent and you want one, copy `github-cr-agent.md`.
+3. Configure `on.workflow_run.workflows` in `trigger-ci-failure-analysis.yml`.
+4. Verify router and analyzer permissions.
+5. Compile agentic workflows if your GitHub Agentic Workflows toolchain requires lock files.
+6. Commit the Markdown specs, generated lock files if any, and router workflow to the default branch.
+7. Optionally create labels.
+
+If lock files are required, treat `gh aw compile` as a bootstrap/toolchain concern only. It is not
+part of steady-state failure routing.
 
 ```text
 .github/
@@ -157,71 +189,43 @@ After compilation, commit the generated lock files too:
     ci-failure-analysis.lock.yml
 ```
 
-## First-Time Setup In A Target Repo
+## Steady-State Operation
 
-1. Install the `gh-aw` CLI extension:
-
-```bash
-gh extension install github/gh-aw
-```
-
-2. Copy the workflow files into the target repo:
-
-```bash
-mkdir -p .github/workflows
-cp path/to/templates/.github/workflows/github-cr-agent.md .github/workflows/
-cp path/to/templates/.github/workflows/ci-failure-analysis.md .github/workflows/
-cp path/to/templates/.github/workflows/trigger-ci-failure-analysis.yml .github/workflows/
-```
-
-3. Compile the agentic workflows:
-
-```bash
-gh aw compile
-```
-
-4. Commit the Markdown specs, generated lock files, and trigger workflow.
-
-5. Edit `.github/workflows/trigger-ci-failure-analysis.yml` and set `on.workflow_run.workflows`
-   to the names of the CI workflows that should trigger analysis in that repository.
-   GitHub requires `workflow_run` triggers to name the workflows they watch.
-
-6. Optionally create labels in the target repo:
-
-| Label | Description |
-|---|---|
-| `code-review` | Issue created by the CR agent |
-| `ci-analysis` | Issue created by the CI failure analysis agent |
-| `severity:blocker` | Code bug — fix required before merge |
-| `severity:minor` | Non-critical issue — track but do not block |
-| `severity:infra` | Infrastructure/credentials issue — no code fix needed |
-
-## Manual Test
-
-After the workflows are pushed:
-
-1. Open a test PR.
-2. Push a commit that intentionally fails a low-risk CI check.
-3. Confirm `Trigger CI Failure Analysis` runs after the failed workflow completes.
-4. Confirm `ci-failure-analysis` creates a `ci-analysis` issue with a severity label.
-
-## Bootstrap Vs Steady State
-
-Bootstrap is one-time per repository:
-
-- Install the router and analyzer on the default branch.
-- Compile agentic workflows if your environment requires lock files.
-- Configure watched workflow names in the router.
-- Verify permissions.
-- Optionally create labels.
-
-Steady state requires only a normal PR or push:
+Once installed on the default branch, steady state requires only normal repository activity:
 
 - PR opens or updates.
-- Review agent comments if configured.
+- Optional Review Agent comments on the PR.
 - CI/test/deploy workflow fails.
-- Failure Router dispatches the analyzer.
-- Failure Analyzer creates a report even without PR context, CR comments, or labels.
+- Failure Router dispatches the analyzer using `workflow_dispatch`.
+- Failure Analyzer creates a report even without PR context, review comments, artifacts, or labels.
+
+### PR-Linked Failures
+
+For PR-linked failures, the analyzer should:
+
+- Read failed jobs, logs, and artifacts.
+- Read PR files/diff.
+- Read existing PR review comments when present.
+- Correlate logs, failed steps, changed files, and review comments.
+
+### Post-Merge Failures
+
+For post-merge or push failures, the analyzer should:
+
+- Read failed jobs, logs, and artifacts.
+- Try to discover an associated PR from the commit SHA.
+- Continue with logs and commit metadata when no PR is discoverable.
+- Avoid assuming review output exists.
+
+## Extending To New Workflows
+
+To analyze another workflow, add its exact workflow name to the router's watched-workflow list.
+No analyzer changes are needed if the workflow can be diagnosed from the stable contract and GitHub
+run metadata.
+
+To support external systems or cross-repository routing later, add a small adapter that uses
+`repository_dispatch` or another trigger, then maps its payload into the same stable analyzer
+contract. Do not make the analyzer parse multiple raw event shapes.
 
 ## Relationship To GithubHelper
 

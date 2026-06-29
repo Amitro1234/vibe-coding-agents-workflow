@@ -17,7 +17,6 @@ safe-outputs:
   # Keep the output constrained; humans still decide whether to act on the issue.
   create-issue:
     title-prefix: "[CR] "
-    labels: [code-review]
 
 tools:
   github:
