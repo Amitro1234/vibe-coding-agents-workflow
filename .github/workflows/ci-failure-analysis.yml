@@ -1,0 +1,190 @@
+name: CI Failure Analysis
+
+# Severity analysis for a failed CI run.
+# Dispatched by the Failure Router (trigger-ci-failure-analysis.yml) via workflow_dispatch,
+# using the stable analyzer contract. Can also be run manually from the Actions UI.
+#
+# Engine: Azure OpenAI (same pattern as the PromoAgent CR agent) — deterministic,
+# bounded cost (one model call per failure), no agentic toolchain.
+# Required secret: AZURE_OPENAI_KEY
+# Optional repo variables: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT
+#
+# Output: a GitHub issue in this repo with one of three severity labels:
+#   severity:blocker — code bug requiring a PR fix
+#   severity:minor   — non-critical issue, track as issue
+#   severity:infra   — credentials / config / environment problem, no code fix needed
+
+on:
+  workflow_dispatch:
+    inputs:
+      owner:
+        description: 'GitHub owner of the failing repository'
+        required: true
+        type: string
+      repo:
+        description: 'Repository name where the failure occurred'
+        required: true
+        type: string
+      run_id:
+        description: 'Workflow run ID that failed'
+        required: true
+        type: string
+      run_url:
+        description: 'URL of the failed workflow run'
+        required: true
+        type: string
+      workflow_name:
+        description: 'Name of the failed workflow'
+        required: true
+        type: string
+      conclusion:
+        description: 'Workflow conclusion from the router (usually failure)'
+        required: true
+        type: string
+      sha:
+        description: 'Commit SHA associated with the failed run'
+        required: true
+        type: string
+      branch:
+        description: 'Branch where the failure occurred'
+        required: true
+        type: string
+      pr_number:
+        description: 'PR number associated with the failure (blank if not a PR)'
+        required: false
+        default: ''
+        type: string
+      trigger_source:
+        description: 'Source that triggered the analyzer (workflow_run, workflow_dispatch, ...)'
+        required: false
+        default: 'workflow_dispatch'
+        type: string
+
+permissions:
+  actions: read       # read failed run logs
+  contents: read
+  pull-requests: read # read PR diff for correlation
+  issues: write       # create the result issue
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install openai
+
+      - name: Collect failure context
+        id: context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ inputs.owner }}
+          REPO: ${{ inputs.repo }}
+          RUN_ID: ${{ inputs.run_id }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -uo pipefail
+
+          # --- failed step name -------------------------------------------------
+          FAILED_STEP="$(gh run view "$RUN_ID" --repo "$OWNER/$REPO" --json jobs \
+            --jq '[.jobs[] | select(.conclusion=="failure") | .steps[]? | select(.conclusion=="failure") | .name] | first // ""' 2>/dev/null || true)"
+
+          # --- failed step logs -> error lines ----------------------------------
+          gh run view "$RUN_ID" --repo "$OWNER/$REPO" --log-failed > /tmp/failed_log.txt 2>/dev/null || true
+          ERROR_LINES="$(grep -iE 'error|fail|exception|traceback|fatal|cannot|not found|denied' /tmp/failed_log.txt 2>/dev/null | tail -40 | cut -c1-300 || true)"
+          if [ -z "$ERROR_LINES" ]; then
+            ERROR_LINES="$(tail -30 /tmp/failed_log.txt 2>/dev/null | cut -c1-300 || true)"
+          fi
+          # cap to ~1500 chars
+          ERROR_LINES="$(printf '%s' "$ERROR_LINES" | tail -c 1500)"
+
+          # --- changed files (PR-linked only) -----------------------------------
+          CHANGED_FILES=""
+          if [ -n "${PR_NUMBER:-}" ] && [ "$PR_NUMBER" != "null" ]; then
+            CHANGED_FILES="$(gh pr diff "$PR_NUMBER" --repo "$OWNER/$REPO" --name-only 2>/dev/null | head -40 || true)"
+          fi
+
+          # --- export to later steps via env file (handles multi-line) ----------
+          {
+            echo "FAILURE_STEP<<__EOF__"
+            printf '%s\n' "$FAILED_STEP"
+            echo "__EOF__"
+            echo "FAILURE_ERROR<<__EOF__"
+            printf '%s\n' "$ERROR_LINES"
+            echo "__EOF__"
+            echo "FAILURE_CHANGED_FILES<<__EOF__"
+            printf '%s\n' "$CHANGED_FILES"
+            echo "__EOF__"
+          } >> "$GITHUB_ENV"
+
+          echo "Failed step: ${FAILED_STEP:-(unknown)}"
+
+      - name: Run failure analysis
+        env:
+          AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT || 'https://keshet-foundry.openai.azure.com/openai/v1' }}
+          AZURE_OPENAI_KEY: ${{ secrets.AZURE_OPENAI_KEY }}
+          AZURE_OPENAI_DEPLOYMENT: ${{ vars.AZURE_OPENAI_DEPLOYMENT || 'gpt-4o-1' }}
+          FAILURE_OWNER: ${{ inputs.owner }}
+          FAILURE_REPO: ${{ inputs.repo }}
+          FAILURE_RUN_ID: ${{ inputs.run_id }}
+          FAILURE_RUN_URL: ${{ inputs.run_url }}
+          FAILURE_WORKFLOW: ${{ inputs.workflow_name }}
+          FAILURE_BRANCH: ${{ inputs.branch }}
+          # FAILURE_STEP / FAILURE_ERROR / FAILURE_CHANGED_FILES come from $GITHUB_ENV
+        run: python scripts/failure_analysis.py
+
+      - name: Post result issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESULT_OWNER: ${{ github.repository_owner }}
+          RESULT_REPO: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          SEVERITY=$(cat /tmp/ci_analysis_severity.txt)
+          EXPLANATION=$(cat /tmp/ci_analysis_explanation.txt)
+
+          case "$SEVERITY" in
+            blocker) EMOJI="🚨" ;;
+            minor)   EMOJI="⚠️" ;;
+            infra)   EMOJI="🔧" ;;
+            *)       EMOJI="❓" ;;
+          esac
+
+          TITLE="${EMOJI} [CI-ANALYSIS] ${{ inputs.owner }}/${{ inputs.repo }} — ${{ inputs.workflow_name }} — ${SEVERITY}"
+
+          BODY="## CI Failure Analysis
+
+          **Repository:** \`${{ inputs.owner }}/${{ inputs.repo }}\`
+          **Workflow:** ${{ inputs.workflow_name }}
+          **Branch:** \`${{ inputs.branch }}\`
+          **Failed step:** ${FAILURE_STEP:-(unknown)}
+          **Run:** ${{ inputs.run_url }}
+
+          ---
+
+          ## Severity: \`${SEVERITY}\` ${EMOJI}
+
+          ${EXPLANATION}
+
+          ---
+          *Analyzed by [ci-failure-analysis](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) · Azure OpenAI*"
+
+          # Create labels if missing, then create the issue (labels are best-effort).
+          gh label create "severity:${SEVERITY}" --repo "${RESULT_OWNER}/${RESULT_REPO}" --color "ededed" --force >/dev/null 2>&1 || true
+          gh label create "ci-analysis" --repo "${RESULT_OWNER}/${RESULT_REPO}" --color "5319e7" --force >/dev/null 2>&1 || true
+
+          gh issue create \
+            --repo "${RESULT_OWNER}/${RESULT_REPO}" \
+            --title "$TITLE" \
+            --label "severity:${SEVERITY}" \
+            --label "ci-analysis" \
+            --body "$BODY"
