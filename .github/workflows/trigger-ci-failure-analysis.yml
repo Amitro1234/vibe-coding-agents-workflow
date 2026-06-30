@@ -82,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh workflow run ci-failure-analysis.md \
+          gh workflow run ci-failure-analysis.yml \
             --repo "$OWNER/$REPO" \
             --ref "$DEFAULT_BRANCH" \
             -f owner="$OWNER" \
