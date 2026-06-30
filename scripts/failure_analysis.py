@@ -5,7 +5,7 @@ Reads failure context from environment variables, calls Azure OpenAI
 (via the OpenAI v1-compatible client — same convention as the PromoAgent CR agent),
 and writes two files consumed by the GitHub Actions workflow:
   /tmp/ci_analysis_severity.txt    — one of: blocker | minor | infra
-  /tmp/ci_analysis_explanation.txt — 2-3 sentence Hebrew explanation
+  /tmp/ci_analysis_explanation.txt — 2-3 sentence English explanation
 
 Environment variables (all set by ci-failure-analysis.yml):
   AZURE_OPENAI_ENDPOINT  — base_url, e.g. https://keshet-foundry.openai.azure.com/openai/v1
@@ -79,7 +79,7 @@ diff) leans `infra` or `minor`.
 Respond with valid JSON only, no markdown fences:
 {{
   "severity": "blocker" | "minor" | "infra",
-  "explanation": "2-3 sentence explanation written in Hebrew. State the likely root cause, why you chose this severity, and what action you recommend."
+  "explanation": "2-3 sentence explanation written in English. State the likely root cause, why you chose this severity, and what action you recommend."
 }}"""
 
     client = OpenAI(base_url=endpoint, api_key=api_key)
@@ -100,7 +100,7 @@ Respond with valid JSON only, no markdown fences:
         print(f"WARNING: unexpected severity '{severity}', defaulting to 'infra'", file=sys.stderr)
         severity = "infra"
 
-    explanation = result.get("explanation", "לא ניתן לקבוע את חומרת הכשל.").strip()
+    explanation = result.get("explanation", "Could not determine the failure severity.").strip()
 
     with open("/tmp/ci_analysis_severity.txt", "w", encoding="utf-8") as f:
         f.write(severity)

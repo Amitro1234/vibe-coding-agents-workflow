@@ -65,7 +65,7 @@ def call_azure_openai(files: str, diff: str) -> str:
 {diff}
 ```
 
-## Output format (write in Hebrew unless the PR is entirely in English)
+## Output format (write in English)
 1. **Overall verdict**: ✅ Approved / 🟠 Needs minor changes / 🔴 Needs major changes
 2. **Summary** (2–3 sentences)
 3. **Issues found** — for each: severity (🔴 Critical / 🟠 Important / 🟡 Suggestion), file+line, the problem, and a concrete fix
