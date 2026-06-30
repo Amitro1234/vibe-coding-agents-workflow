@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  controlled-failure:
+    name: Controlled failure for analyzer e2e
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Emit diagnostic context
+        run: |
+          echo "This workflow fails intentionally to validate the generic CI failure analysis flow."
+          echo "Expected behavior: Failure Router dispatches ci-failure-analysis with this run_id."
+
+      - name: Fail intentionally
+        run: |
+          echo "::error file=.github/workflows/controlled-ci-failure.yml,line=20::Intentional blocker test failure for CI analyzer validation"
+          exit 1
